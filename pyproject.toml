@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forwardgal"
+version = "0.0.1"
+description = "Forward modelling of cluster-lensed galaxies with fixed deflection maps"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Erik Solhaug" }]
+# Dependencies are added milestone by milestone, when first needed.
+dependencies = [
+    "numpy",
+    "astropy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "lenstronomy",  # independent cross-check of lensed images; tests only
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forwardgal"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
