@@ -20,6 +20,27 @@ conda activate forwardgal
 pip install -e ".[test]"
 ```
 
+## How pixels are rendered
+
+A detector pixel records the integral of the surface brightness over its area,
+so the model computes pixel-integrated values, not point samples:
+
+- **Near each Sérsic centre** (a small patch of pixels), the pixel integral is
+  computed exactly: in elliptical polar coordinates around the centre, the
+  radial integral of a Sérsic profile has a closed form (incomplete gamma
+  function), leaving a smooth 1-D integral over angle. This is accurate to
+  ~10⁻⁶ for any Sérsic index 0.5 ≤ n ≤ 8. Uniform point sampling is not:
+  for n ≥ 4 it can be wrong by factors of several in the central pixels.
+- **Elsewhere**, where the profile is smooth, each pixel is subsampled
+  uniformly (s × s points) and averaged.
+- **With lensing** (planned, M4), a pixel's footprint in the source plane is
+  approximated by a parallelogram from the local lens Jacobian ∂β/∂θ. This
+  approximation is tested explicitly and breaks down very close to critical
+  curves.
+
+The rendering settings (subsampling s, patch size, number of angles) are
+recorded with every saved fit.
+
 ## Conventions
 
 - Image plane θ, source plane β = θ − α(θ), all in arcsec.
