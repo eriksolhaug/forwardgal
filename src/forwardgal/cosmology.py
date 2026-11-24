@@ -47,7 +47,7 @@ def dls_over_ds(z_lens, z_src, cosmo):
     if z_src <= z_lens:
         raise ValueError(f"z_src = {z_src} is not behind z_lens = {z_lens}")
     c = cosmo.to_astropy()
-    d_ls = c.angular_diameter_distance_z1z2(z_lens, z_src)
+    d_ls = c.angular_diameter_distance(z_lens, z_src)  # between two redshifts
     d_s = c.angular_diameter_distance(z_src)
     return float(d_ls / d_s)
 

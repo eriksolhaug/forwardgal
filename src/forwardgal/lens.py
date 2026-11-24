@@ -22,6 +22,13 @@ alpha_x = -dplx by default (``x_points_west=True``). This was verified on the
 COOL J1153 model: with the flip, quasar images 1A, 1B, 1C back-trace to one
 source position (rms 0.1"); without it they scatter by 18".
 
+Interpolation: alpha between map pixels is interpolated with a cubic
+B-spline by default (``interpolation="bicubic"``), or bilinearly. Measured on
+the COOL J1153 model (M4c): magnifications from the bicubic interpolant match
+Lenstool's own mu map to 1.000-1.005 (5-95%), bilinear to 0.990-1.013; traced
+positions differ by up to 0.019" between the two. Both are written with
+jax.numpy, so they work in numpy code and inside JAX-compiled fits.
+
 Sky frames: Lenstool labels its WCS FK5 but never transforms between frames, so
 RA/Dec from any input (e.g. ICRS JWST mosaics) are used as given, without an
 FK5 <-> ICRS conversion (which would shift positions by up to ~0.02").
@@ -31,9 +38,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
+from scipy.ndimage import spline_filter
 
 from forwardgal.cosmology import deflection_scale
 
@@ -56,6 +65,11 @@ class DeflectionField:
         0-based [row, col] of the reference pixel (where theta = 0).
     z_ref : float
         Source redshift for which the maps were computed.
+    interpolation : {"bicubic", "bilinear"}
+        How alpha is interpolated between map pixels (see module docstring).
+    coef_x, coef_y : (My, Mx) arrays or None
+        Cubic B-spline coefficients of alpha_x, alpha_y (computed
+        automatically for "bicubic").
     """
 
     alpha_x: np.ndarray
@@ -66,6 +80,18 @@ class DeflectionField:
     i0: float
     j0: float
     z_ref: float
+    interpolation: str = "bicubic"
+    coef_x: np.ndarray | None = None
+    coef_y: np.ndarray | None = None
+
+    def __post_init__(self):
+        if self.interpolation not in ("bicubic", "bilinear"):
+            raise ValueError(f"interpolation must be 'bicubic' or 'bilinear', got {self.interpolation!r}")
+        if self.interpolation == "bicubic" and self.coef_x is None:
+            # Prefilter once: coefficients such that the spline passes exactly
+            # through every map value.
+            self.coef_x = spline_filter(np.asarray(self.alpha_x, float), order=3, mode="mirror")
+            self.coef_y = spline_filter(np.asarray(self.alpha_y, float), order=3, mode="mirror")
 
     def pixel_to_theta(self, row, col):
         """0-based map pixel [row, col] -> (theta_x, theta_y) in arcsec.
@@ -78,34 +104,39 @@ class DeflectionField:
 
     def theta_to_pixel(self, theta_x, theta_y):
         """(theta_x, theta_y) in arcsec -> 0-based map pixel (row, col), as floats."""
-        col = np.asarray(theta_x) / self.step_x + self.j0
-        row = np.asarray(theta_y) / self.step_y + self.i0
+        col = jnp.asarray(theta_x) / self.step_x + self.j0
+        row = jnp.asarray(theta_y) / self.step_y + self.i0
         return row, col
 
     def alpha(self, theta_x, theta_y):
         """Deflection (alpha_x, alpha_y) in arcsec at arbitrary theta (arcsec).
 
-        Bilinear interpolation between map pixels. Accepts scalars or arrays of
-        any (matching) shape. Positions outside the map give NaN.
+        Interpolated between map pixels (``self.interpolation``). Accepts
+        scalars or arrays of any (matching) shape, numpy or JAX. Positions
+        outside the map give NaN.
         """
         row, col = self.theta_to_pixel(theta_x, theta_y)
+        if self.interpolation == "bicubic":
+            return bspline3(self.coef_x, row, col), bspline3(self.coef_y, row, col)
         return bilinear(self.alpha_x, row, col), bilinear(self.alpha_y, row, col)
 
     def backtrace(self, theta_x, theta_y):
         """Lens equation: source-plane beta = theta - alpha(theta), in arcsec."""
         alpha_x, alpha_y = self.alpha(theta_x, theta_y)
-        return np.asarray(theta_x) - alpha_x, np.asarray(theta_y) - alpha_y
+        return jnp.asarray(theta_x) - alpha_x, jnp.asarray(theta_y) - alpha_y
 
     def rescaled(self, z_lens, z_src, cosmo):
         """Copy of this field with alpha converted from z_ref to z_src.
 
-        Multiplies both maps by f = (D_ls/D_s)(z_src) / (D_ls/D_s)(z_ref);
-        see forwardgal.cosmology. The returned field has z_ref = z_src.
+        Multiplies both maps (and spline coefficients, which are linear in the
+        maps) by f = (D_ls/D_s)(z_src) / (D_ls/D_s)(z_ref); see
+        forwardgal.cosmology. The returned field has z_ref = z_src.
         """
         f = deflection_scale(z_lens, self.z_ref, z_src, cosmo)
-        return replace(
-            self, alpha_x=f * self.alpha_x, alpha_y=f * self.alpha_y, z_ref=float(z_src)
-        )
+        scaled = dict(alpha_x=f * self.alpha_x, alpha_y=f * self.alpha_y, z_ref=float(z_src))
+        if self.coef_x is not None:
+            scaled.update(coef_x=f * self.coef_x, coef_y=f * self.coef_y)
+        return replace(self, **scaled)
 
     def sky_to_theta(self, ra_deg, dec_deg):
         """RA, Dec (deg) -> (theta_x, theta_y) in arcsec, via the maps' TAN plane."""
@@ -136,16 +167,17 @@ def bilinear(arr, row, col):
     array with the shape of ``row``; NaN where the position lies outside
     [0, Ny-1] x [0, Nx-1].
     """
-    row = np.asarray(row, dtype=float)
-    col = np.asarray(col, dtype=float)
+    row = jnp.asarray(row, dtype=float)
+    col = jnp.asarray(col, dtype=float)
+    arr = jnp.asarray(arr)
     ny, nx = arr.shape
     inside = (row >= 0) & (row <= ny - 1) & (col >= 0) & (col <= nx - 1)
 
     # Lower-left grid point. Clipping to ny-2 / nx-2 lets a position exactly on
     # the last row/column use weight f = 1 on that edge instead of indexing past it.
     # Outside points are clipped too (so indexing is safe) and masked at the end.
-    i = np.clip(np.floor(row).astype(int), 0, ny - 2)
-    j = np.clip(np.floor(col).astype(int), 0, nx - 2)
+    i = jnp.clip(jnp.floor(row).astype(int), 0, ny - 2)
+    j = jnp.clip(jnp.floor(col).astype(int), 0, nx - 2)
     fr = row - i
     fc = col - j
 
@@ -155,7 +187,44 @@ def bilinear(arr, row, col):
         + fr * (1 - fc) * arr[i + 1, j]
         + fr * fc * arr[i + 1, j + 1]
     )
-    return np.where(inside, value, np.nan)
+    return jnp.where(inside, value, jnp.nan)
+
+
+def bspline3(coef, row, col):
+    """Cubic B-spline interpolation at fractional 0-based [row, col].
+
+    ``coef`` are the spline coefficients of the map (scipy.ndimage.spline_filter
+    with order=3, mode="mirror"), so that the spline passes exactly through the
+    map values. With i = floor(row), t = row - i (likewise for col):
+
+        value = sum_{a,b = -1..2} w_a(t_row) w_b(t_col) coef[i + a, j + b]
+
+    with the cubic B-spline weights w_-1 = (1-t)^3/6, w_0 = (3t^3 - 6t^2 + 4)/6,
+    w_1 = (-3t^3 + 3t^2 + 3t + 1)/6, w_2 = t^3/6. Smooth (twice continuously
+    differentiable) in (row, col), so magnifications have no jumps at map-pixel
+    edges. Positions outside [0, Ny-1] x [0, Nx-1] give NaN; within one pixel
+    of the map edge the stencil is clipped (approximate there).
+    """
+    row = jnp.asarray(row, dtype=float)
+    col = jnp.asarray(col, dtype=float)
+    coef = jnp.asarray(coef)
+    ny, nx = coef.shape
+    inside = (row >= 0) & (row <= ny - 1) & (col >= 0) & (col <= nx - 1)
+
+    def weights(t):
+        t2, t3 = t * t, t * t * t
+        return ((1 - t) ** 3 / 6, (3 * t3 - 6 * t2 + 4) / 6, (-3 * t3 + 3 * t2 + 3 * t + 1) / 6, t3 / 6)
+
+    i = jnp.floor(row).astype(int)
+    j = jnp.floor(col).astype(int)
+    wr, wc = weights(row - i), weights(col - j)
+    value = 0.0
+    for a in range(4):
+        ia = jnp.clip(i + a - 1, 0, ny - 1)
+        for b in range(4):
+            jb = jnp.clip(j + b - 1, 0, nx - 1)
+            value = value + wr[a] * wc[b] * coef[ia, jb]
+    return jnp.where(inside, value, jnp.nan)
 
 
 def _read_map(path):
@@ -165,7 +234,7 @@ def _read_map(path):
         return hdu.data.astype(np.float64), hdu.header
 
 
-def load_deflection(path_x, path_y, z_ref, x_points_west=True):
+def load_deflection(path_x, path_y, z_ref, x_points_west=True, interpolation="bicubic"):
     """Load Lenstool-style deflection maps (arcsec) with their WCS.
 
     Parameters
@@ -179,6 +248,8 @@ def load_deflection(path_x, path_y, z_ref, x_points_west=True):
         True if the x map is the deflection along WEST (Lenstool convention);
         it is then negated so that alpha_x points east like theta_x. Set False
         for maps whose x deflection already points east.
+    interpolation : {"bicubic", "bilinear"}, default "bicubic"
+        How alpha is interpolated between map pixels.
 
     Returns
     -------
@@ -222,4 +293,34 @@ def load_deflection(path_x, path_y, z_ref, x_points_west=True):
         i0=float(wcs.wcs.crpix[1]) - 1.0,
         j0=float(wcs.wcs.crpix[0]) - 1.0,
         z_ref=float(z_ref),
+        interpolation=interpolation,
     )
+
+
+def no_lens(ra0, dec0, half_size_arcsec, step_arcsec=0.5):
+    """No lens (GALFIT-like fits): a DeflectionField with alpha = 0 everywhere, so beta = theta.
+
+    ra0, dec0 : the reference position (deg), where theta = 0; e.g. the
+        cutout centre. theta_x = +east, theta_y = +north (arcsec), in the TAN
+        plane at (ra0, dec0), as for a real lens model.
+    half_size_arcsec : the field covers |theta_x|, |theta_y| <= this
+        (outside it, like any deflection map, alpha is NaN); make it cover
+        the cutout with room to spare.
+    step_arcsec : map pixel size. alpha is 0, so it only sets how finely the
+        (empty) maps are stored: any value works.
+
+    Everything that takes a lens field (tracing, point positions, critical
+    curves, magnification) then works unchanged: no critical curves, mu = 1.
+    z_ref is NaN: a non-lens has no redshift to rescale to.
+    """
+    n = 2 * int(np.ceil(half_size_arcsec / step_arcsec)) + 1  # odd: the reference is the centre pixel
+    w = WCS(naxis=2)
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    w.wcs.crval = [float(ra0), float(dec0)]
+    w.wcs.crpix = [(n + 1) / 2, (n + 1) / 2]  # 1-based FITS convention: the centre pixel
+    w.wcs.cdelt = [-step_arcsec / 3600.0, step_arcsec / 3600.0]  # north up, east left
+    w.wcs.radesys = "ICRS"
+    zeros = np.zeros((n, n))
+    c = (n - 1) / 2  # 0-based centre
+    return DeflectionField(alpha_x=zeros, alpha_y=zeros.copy(), wcs=w, step_x=-float(step_arcsec),
+                           step_y=float(step_arcsec), i0=c, j0=c, z_ref=float("nan"), interpolation="bilinear")

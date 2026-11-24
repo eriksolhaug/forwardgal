@@ -6,6 +6,7 @@ covers [j - 0.5, j + 0.5) in pixel units; its centre is at j.
 
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
 
 
@@ -56,4 +57,4 @@ def local_theta(rows, cols, pixscale, row0, col0):
     Only valid for an unrotated, north-up, east-left grid; used for tests and
     unlensed rendering. Real data use the WCS (see forwardgal.lens).
     """
-    return -pixscale * (np.asarray(cols) - col0), pixscale * (np.asarray(rows) - row0)
+    return -pixscale * (jnp.asarray(cols) - col0), pixscale * (jnp.asarray(rows) - row0)

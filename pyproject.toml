@@ -15,9 +15,18 @@ dependencies = [
     "astropy",
     "matplotlib",
     "jax",  # differentiable source model (M3)
+    "scipy",  # mask dilation (regions.py)
+    "optax",  # gradient-based optimizers (M10)
+    "numpyro",  # NUTS sampling (M11)
+    "corner",  # corner plots of posterior samples (M11)
+    "pyyaml",  # model files and fit history (M13)
 ]
 
 [project.optional-dependencies]
+gui = [
+    "pyside6",  # the desktop GUI (M15): python -m forwardgal.gui
+    "pyqtgraph",  # fast image panels and draggable ellipses (G1)
+]
 test = [
     "pytest",
     "lenstronomy",  # independent cross-check of lensed images; tests only
@@ -28,3 +37,10 @@ packages = ["src/forwardgal"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Harmless FITS-header notes from astropy (JWST date/observatory keywords, the old
+    # RADECSYS spelling); positions are unaffected. Other warnings stay visible.
+    "ignore:'datfix' made the change:astropy.wcs.FITSFixedWarning",
+    "ignore:'obsfix' made the change:astropy.wcs.FITSFixedWarning",
+    "ignore:RADECSYS= :astropy.wcs.FITSFixedWarning",
+]

@@ -126,3 +126,80 @@ def test_alpha_and_backtrace(field):
     bx, by = field.backtrace(tx, ty)
     np.testing.assert_allclose(bx, tx - ax, atol=1e-12)
     np.testing.assert_allclose(by, ty - ay, atol=1e-12)
+
+
+# --- bicubic (cubic B-spline) interpolation ---------------------------------------
+
+from scipy.ndimage import map_coordinates  # noqa: E402
+
+from forwardgal.lens import bspline3  # noqa: E402
+
+
+def test_bspline_matches_scipy_map_coordinates():
+    # Same algorithm as scipy's cubic spline interpolation (order 3, mirror).
+    rng = np.random.default_rng(5)
+    arr = rng.normal(size=(40, 50)).cumsum(axis=0).cumsum(axis=1)  # smooth-ish field
+    from scipy.ndimage import spline_filter
+    coef = spline_filter(arr, order=3, mode="mirror")
+    r, c = rng.uniform(2, 37, 300), rng.uniform(2, 47, 300)  # >= 2 px from the edge
+    ours = np.asarray(bspline3(coef, r, c))
+    theirs = map_coordinates(arr, [r, c], order=3, mode="mirror")
+    np.testing.assert_allclose(ours, theirs, rtol=1e-10, atol=1e-10)
+
+
+def test_bspline_interpolates_map_values_and_cubics():
+    from scipy.ndimage import spline_filter
+    rows, cols = np.mgrid[0:60, 0:60].astype(float)
+    f = lambda r, c: 0.3 + 0.2 * r - 0.1 * c + 0.01 * r * c + 1e-4 * r**3  # noqa: E731
+    coef = spline_filter(f(rows, cols), order=3, mode="mirror")
+    # exact at grid points ...
+    np.testing.assert_allclose(np.asarray(bspline3(coef, rows[20:40, 20:40], cols[20:40, 20:40])),
+                               f(rows, cols)[20:40, 20:40], atol=1e-6)
+    # ... and reproduces this cubic between them, away from the edges
+    r, c = np.array([25.3, 30.71, 33.5]), np.array([29.9, 24.12, 35.5])
+    np.testing.assert_allclose(np.asarray(bspline3(coef, r, c)), f(r, c), atol=1e-6)
+
+
+def test_bspline_outside_is_nan():
+    coef = np.ones((10, 10))
+    out = np.asarray(bspline3(coef, np.array([-0.1, 9.1, 5.0]), np.array([5.0, 5.0, 9.5])))
+    assert np.all(np.isnan(out))
+
+
+def test_bicubic_is_the_default_and_bilinear_selectable(field, tmp_path):
+    assert field.interpolation == "bicubic" and field.coef_x is not None
+    rows, cols = np.mgrid[0:101, 0:101]
+    write_map(tmp_path / "x2.fits", cols)
+    write_map(tmp_path / "y2.fits", rows)
+    f2 = load_deflection(tmp_path / "x2.fits", tmp_path / "y2.fits", 1.5, interpolation="bilinear")
+    assert f2.interpolation == "bilinear" and f2.coef_x is None
+    with pytest.raises(ValueError, match="interpolation"):
+        load_deflection(tmp_path / "x2.fits", tmp_path / "y2.fits", 1.5, interpolation="cubic")
+
+
+# --- no lens (N1) ------------------------------------------------------------------
+
+
+def test_no_lens_is_the_identity_around_the_reference():
+    from forwardgal.lens import no_lens
+
+    f = no_lens(RA0, DEC0, half_size_arcsec=20.0)
+    assert f.sky_to_theta(RA0, DEC0) == pytest.approx((0.0, 0.0), abs=1e-9)
+    ra = RA0 + 10.0 / 3600 / np.cos(np.radians(DEC0))  # 10" east, 5" north
+    tx, ty = f.sky_to_theta(ra, DEC0 + 5.0 / 3600)
+    assert tx == pytest.approx(10.0, abs=1e-3) and ty == pytest.approx(5.0, abs=1e-3)
+    t = np.array([-19.0, 0.3, 12.7]), np.array([4.0, -18.5, 0.0])
+    bx, by = f.backtrace(*t)
+    np.testing.assert_array_equal(bx, t[0])  # beta = theta, exactly
+    np.testing.assert_array_equal(by, t[1])
+    assert not np.isfinite(float(f.backtrace(25.0, 0.0)[0]))  # outside the field, as for a lens model
+
+
+def test_no_lens_has_no_critical_curves_and_unit_magnification():
+    from forwardgal.critical import critical_curves
+    from forwardgal.images import magnification
+    from forwardgal.lens import no_lens
+
+    f = no_lens(RA0, DEC0, half_size_arcsec=10.0)
+    assert critical_curves(f) == []
+    assert magnification(f, 1.3, -2.0) == pytest.approx(1.0, abs=1e-12)
