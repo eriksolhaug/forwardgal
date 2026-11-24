@@ -1346,3 +1346,43 @@ def test_window_content_scrolls_on_a_small_screen(loaded):
     assert w.centralWidget() is w.scroll and w.scroll.widgetResizable()
     inner = w.scroll.widget()
     assert (inner.minimumWidth(), inner.minimumHeight()) == MIN_CONTENT
+
+
+@needs_data
+def test_memory_limit_stops_a_fit(app, tmp_path, monkeypatch):
+    """Preferences: the memory limit (this computer's, in QSettings) stops a GUI-started fit that goes over it."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from m13c_write_example import example_config
+
+    from forwardgal.gui.app import DEFAULT_MEMORY_GB, MainWindow
+    from forwardgal.serialize import write_yaml
+
+    monkeypatch.setenv("FORWARDGAL_PREFERENCES", str(tmp_path / "prefs.ini"))  # not the user's own settings
+    cfg = example_config()
+    cfg["fit"] = {"method": "lm", "n_starts": 1, "seed": 0, "max_iter": 3}
+    write_yaml(cfg, tmp_path / "model.yaml")
+    w = MainWindow()
+    try:
+        assert w.memory_limit_gb() == DEFAULT_MEMORY_GB
+        w.open_preferences()
+        assert w.dialog.memory.value() == DEFAULT_MEMORY_GB
+        w.dialog.memory.setValue(0.05)  # 50 MB: any Python process with JAX goes over it at once
+        w.dialog.ok()
+        assert w.memory_limit_gb() == pytest.approx(0.05)
+        assert w.load(tmp_path / "model.yaml")
+        w.fitpanel.fit_all.click()
+        import time
+
+        t0 = time.time()
+        while w.process is not None and time.time() - t0 < 120:  # (let the 0.5 s memory timer run, as in the app)
+            w.process.waitForFinished(100)
+            app.processEvents()
+        assert w.process is None and "stopped: it used" in w.fitpanel.progress.text()
+        assert "limit of 0.05 GB" in w.fitpanel.progress.text()
+        assert [r["kind"] for r in w.history.rows] == ["draft"]  # the draft was saved; no fit folder
+    finally:
+        w.close()
+        w.deleteLater()
+        app.processEvents()

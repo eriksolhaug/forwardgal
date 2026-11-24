@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
+from PySide6.QtCore import QFileSystemWatcher, QProcess, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QTransform
 from PySide6.QtWidgets import (
     QApplication,
@@ -96,6 +96,7 @@ QCheckBox#inmodel::indicator { width: 6px; height: 12px; border-radius: 2px; }
 QCheckBox#inmodel::indicator:checked { background: #f0a04b; border-color: #f0a04b; }
 """
 
+DEFAULT_MEMORY_GB = 6.0  # Preferences: memory limit of GUI-started fits (a 16 GB Mac)
 MIN_CONTENT = (1200, 780)  # pixels: the window's content scrolls below this (small screens)
 RENDER_DELAY_MS = 30  # coalesce drag events: render at most this often, with the latest state
 SOURCE_PIXELS = 200  # source-plane display grid (per side)
@@ -266,6 +267,9 @@ class MainWindow(QMainWindow):
         self.fitpanel.corner_clicked.connect(self.open_corner)
         self._corner = None  # the last NUTS run's corner.png
         self.process = None  # the running fit (QProcess) or None
+        self._memtimer = QTimer(self)  # watches the running fit's memory (Preferences: the limit)
+        self._memtimer.setInterval(500)
+        self._memtimer.timeout.connect(self._check_memory)
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -357,6 +361,10 @@ class MainWindow(QMainWindow):
             s.addAction(a)
         self.flux_units.triggered.connect(lambda a: self.set_flux_unit(a.data()))
         s.addSeparator()
+        a = QAction("Preferences…", self)
+        a.setMenuRole(QAction.MenuRole.NoRole)  # (keep it in this menu on macOS)
+        a.triggered.connect(self.open_preferences)
+        s.addAction(a)
         a = QAction("Model settings…", self)
         a.setMenuRole(QAction.MenuRole.NoRole)  # (macOS would otherwise move "settings" to the app menu)
         a.triggered.connect(self.open_settings)
@@ -768,7 +776,9 @@ class MainWindow(QMainWindow):
         p.finished.connect(self._fit_finished)
         self.fitpanel.set_running(True)
         self.fitpanel.set_progress(text)
+        self._peak, self._memory_stop = 0, None
         p.start()
+        self._memtimer.start()
         self._update_tabs()
 
     def cancel_fit(self):
@@ -791,11 +801,18 @@ class MainWindow(QMainWindow):
         if self.process.bytesAvailable():  # the last lines
             self._fit_output()
         cancelled = getattr(self, "_fit_cancelled", False)
+        self._memtimer.stop()
         self.process, self._fit_cancelled = None, False
         self.fitpanel.set_running(False)
         self._update_tabs()
         self.refresh_history()
         self._update_nuts()
+        if self._memory_stop is not None:
+            used, limit = self._memory_stop
+            self.fitpanel.set_progress(f"stopped: it used {used:.1f} GB, more than the limit of {limit:g} GB "
+                                       "(Settings → Preferences…); nothing saved")
+            self.statusBar().showMessage("the fit was stopped by the memory limit", 8000)
+            return
         if cancelled:
             self.fitpanel.set_progress("cancelled (nothing saved)")
             return
@@ -818,7 +835,8 @@ class MainWindow(QMainWindow):
         elif self.spec == self._fit_spec:
             self.load_history(folder, "bestfit")
             self.fitpanel.set_progress(f"done: {folder} (" + ("posteriors in result.yaml; corner plot"
-                                                              if self._kind == "nuts" else "best fit loaded") + ")")
+                                                              if self._kind == "nuts" else "best fit loaded")
+                                       + f"; peak memory {self._peak / 1024**3:.1f} GB)")
         else:
             self.fitpanel.set_progress(f"done: {folder} (not loaded: the model was changed meanwhile)")
 
@@ -955,6 +973,48 @@ class MainWindow(QMainWindow):
         self.dialog = UseInBandDialog(self.bands[self.active].name, folder, [self.bands[i].name for i in others],
                                       apply, parent=self)
         self.dialog.open()
+
+    # --- preferences: the memory limit of GUI-started fits --------------------------------------
+
+    @staticmethod
+    def preferences():
+        """This computer's preferences (QSettings; FORWARDGAL_PREFERENCES = an .ini file instead, e.g. in tests)."""
+        import os
+
+        path = os.environ.get("FORWARDGAL_PREFERENCES")
+        return QSettings(path, QSettings.IniFormat) if path else QSettings("forwardgal", "forwardgal")
+
+    def memory_limit_gb(self):
+        """The limit (GB) for GUI-started fits and NUTS runs; 0 = none."""
+        return float(self.preferences().value("fit_memory_gb", DEFAULT_MEMORY_GB))
+
+    def set_memory_limit_gb(self, gb):
+        prefs = self.preferences()
+        prefs.setValue("fit_memory_gb", float(gb))
+        prefs.sync()
+        self.statusBar().showMessage(f"memory limit for fits: {gb:g} GB" if gb else "no memory limit for fits",
+                                     5000)
+
+    def open_preferences(self):
+        from forwardgal.gui.preferences_dialog import PreferencesDialog
+
+        self.dialog = PreferencesDialog(self.memory_limit_gb(), self.set_memory_limit_gb, self)
+        self.dialog.open()
+
+    def _check_memory(self):
+        """Every 0.5 s while a run goes on: its memory; stop it above the limit."""
+        from forwardgal.memory import footprint
+
+        if self.process is None:
+            return
+        used = footprint(self.process.processId())
+        if used is None:
+            return
+        self._peak = max(self._peak, used)
+        limit = self.memory_limit_gb()
+        if limit and used > limit * 1024**3 and self._memory_stop is None:
+            self._memory_stop = (used / 1024**3, limit)
+            self.process.kill()
 
     def closeEvent(self, event):  # noqa: N802 (Qt's name)
         if self.process is not None:  # do not leave a fit running without its window

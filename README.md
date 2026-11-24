@@ -31,9 +31,12 @@ so the model computes pixel-integrated values, not point samples:
   (incomplete gamma function). The remaining angular integral is split at the
   pixel's corner directions into smooth pieces, each integrated with
   12-point Gauss–Legendre quadrature. Accuracy: ~10⁻⁶ for any Sérsic index
-  0.5 ≤ n ≤ 8. Uniform point sampling is not reliable there: for n ≥ 4 it is
-  wrong by 1–20% next to the centre and can be off by large factors in the
-  centre pixel.
+  0.5 ≤ n ≤ 8. Uniform point sampling is not reliable there: for n ≥ 4 the
+  centre pixel is wrong by 4–15% when the profile centre falls between
+  sample points, and by large factors (×7 for n = 4, ×10⁴ for n = 8) when it
+  falls on one; it depends on where the centre sits, so the model would jump
+  as a fit moves it. Next to the centre the error is ~1% (5 × 5 samples,
+  R_e = 0.5–1.7 px).
 - **Elsewhere**, each pixel is subsampled uniformly (s × s = 5 × 5 points by
   default) and averaged. Measured error: ≲ 1.5 × 10⁻³ of the pixel value for
   the most compact profiles (R_e ≈ 1 px), smaller for larger R_e.
